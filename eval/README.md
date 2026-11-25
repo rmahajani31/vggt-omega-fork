@@ -70,9 +70,10 @@ released frame lists for all 16 Sintel sequences and 13 ETH3D scenes.
 ```
 
 Each run scores the same ten benchmark views and 45 camera pairs. The baseline
-uses ten clean images. Subsequent runs blur 2, 3, 4, or 5 images, keeping the
-first view clean. Each count uses ten distinct seeded selections. For a shared
-seed the selections are nested across counts. This gives 41 inferences per
+uses ten clean images. Subsequent runs blur 1, 2, 3, 4, or 5 images, keeping the
+first view clean. The one-blurred-view split tests each of the nine eligible
+views once. The other counts use ten distinct seeded selections each. For a shared
+seed the selections are nested across counts. This gives 50 inferences per
 scene. Use `--scenes alley_1` to inspect a single scene.
 
 Every invocation of `motion_blur.py` clears its entire output directory before

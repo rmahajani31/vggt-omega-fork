@@ -38,10 +38,21 @@ def sample_assignments(eligible: list[int], first_seed: int) -> dict[int, dict[i
             for count, subset in subsets.items():
                 seen[count].add(subset)
         seed += 1
-    by_count = {
+    # The fixed clean first view leaves nine possible single-view trials.
+    single_trials = {}
+    remaining = set(eligible)
+    seed = first_seed
+    while remaining:
+        position = random.Random(seed).choice(eligible)
+        if position in remaining:
+            single_trials[seed] = [position]
+            remaining.remove(position)
+        seed += 1
+    by_count = {1: single_trials}
+    by_count.update({
         count: {seed: order[:count] for seed, order in assignments.items()}
         for count in ORIGINAL_COUNTS
-    }
+    })
     return by_count
 
 
@@ -160,9 +171,7 @@ def run_scene(args, scene, indices, dataset, predictor):
 
 def coverage_metrics(result):
     curve = {"10_0": result["runs"]["normal"]["full"]["metrics"]}
-    for count in ORIGINAL_COUNTS:
-        split = f"{10 - count}_{count}"
-        row = result["splits"][split]
+    for split, row in result["splits"].items():
         curve[split] = row["mean_metrics"]
     return curve
 

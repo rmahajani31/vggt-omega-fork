@@ -14,7 +14,8 @@ import cv2
 import numpy as np
 import torch
 
-from evaluate import Dataset, Predictor, REPOSITORY, ROOT, pose_metrics, score_scene
+from evaluate import Dataset, Predictor, REPOSITORY, ROOT
+from metrics import crop_depth, frame_depth_metrics, pose_errors, pose_metrics, resize_depth
 
 
 ORIGINAL_COUNTS = (2, 3, 4, 5)
@@ -57,7 +58,11 @@ def sample_assignments(eligible: list[int], first_seed: int) -> dict[int, dict[i
 
 
 def mean_metrics(rows):
-    return {key: fmean(row[key] for row in rows) for key in rows[0]}
+    means = {}
+    for key in rows[0]:
+        values = [row[key] for row in rows if row[key] is not None]
+        means[key] = fmean(values) if values else None
+    return means
 
 
 def write_blurred(source: str, destination: Path) -> int:
@@ -74,23 +79,34 @@ def write_blurred(source: str, destination: Path) -> int:
     return kernel_width
 
 
-def score_views(batch, prediction):
+def score_views(batch, prediction, blurred_positions):
     depth, poses, crop = prediction
-    depth_scores, rotation, translation = score_scene(
-        depth, poses, crop, batch.depth, batch.extrinsics,
-    )
-    metrics = {
-        **pose_metrics(rotation, translation),
-        "delta125": depth_scores["delta125"] * 100.0,
-        "AbsRel": depth_scores["AbsRel"],
-    }
-    if not np.isfinite(list(metrics.values())).all():
-        raise ValueError(f"Non-finite metrics for frames {batch.frame_names}")
-    return {
-        "scored_frames": batch.frame_names,
-        "pose_pairs": int(rotation.size),
-        "metrics": metrics,
-    }
+    target = crop_depth(batch.depth, crop)
+    depths = list(frame_depth_metrics(resize_depth(depth, target.shape[-2:]), target))
+    rotation, translation = pose_errors(poses, batch.extrinsics)
+    # Matches the unordered pair ordering in pose_errors (torch.combinations).
+    first, second = np.triu_indices(len(poses), k=1)
+    blurred = np.isin(np.arange(len(poses)), blurred_positions)
+    scores = {}
+    for group, mask in (("full", np.ones_like(blurred)), ("clean_only", ~blurred),
+                        ("blurred_only", blurred)):
+        indices = np.flatnonzero(mask)
+        pairs = mask[first] & mask[second]
+        rows = [depths[i] for i in indices if depths[i] is not None]
+        metrics = {"AUC@3": None, "AUC@30": None, "delta125": None, "AbsRel": None}
+        if pairs.any():
+            metrics.update(pose_metrics(rotation[pairs], translation[pairs]))
+        if rows:
+            metrics["delta125"] = float(np.mean([r["delta125"] for r in rows])) * 100
+            metrics["AbsRel"] = float(np.mean([r["AbsRel"] for r in rows]))
+        elif group == "full":
+            raise ValueError("no valid depth frames")
+        if any(v is not None and not np.isfinite(v) for v in metrics.values()):
+            raise ValueError(f"Non-finite {group} metrics for {batch.frame_names}")
+        scores[group] = {"scored_frames": [batch.frame_names[i] for i in indices],
+                         "pose_pairs": int(pairs.sum()), "valid_depth_frames": len(rows),
+                         "metrics": metrics}
+    return scores
 
 
 def run_scene(args, scene, indices, dataset, predictor):
@@ -125,7 +141,7 @@ def run_scene(args, scene, indices, dataset, predictor):
         runs[name] = {
             "input_frames": batch.frame_names,
             "blurred_frames": [batch.frame_names[i] for i in blurred_positions],
-            "full": score_views(batch, prediction),
+            **score_views(batch, prediction, blurred_positions),
         }
 
     run("normal", [])
@@ -139,6 +155,10 @@ def run_scene(args, scene, indices, dataset, predictor):
         splits[split] = {
             "trials": trials,
             "mean_metrics": mean_metrics([runs[t["run"]]["full"]["metrics"] for t in trials]),
+            "subset_metrics": {
+                group: mean_metrics([runs[t["run"]][group]["metrics"] for t in trials])
+                for group in ("clean_only", "blurred_only")
+            },
         }
 
     result = {
@@ -166,13 +186,13 @@ def run_scene(args, scene, indices, dataset, predictor):
         print(f"{scene} {count / 10:.0%} blurred: AUC@30 {scores['AUC@30']:.2f}, "
               f"AUC@3 {scores['AUC@3']:.2f}, delta125 {scores['delta125']:.2f}, "
               f"AbsRel {scores['AbsRel']:.5f}")
-    return curve
+    return {group: coverage_metrics(result, group) for group in ("clean_only", "blurred_only")} | {"full": curve}
 
 
-def coverage_metrics(result):
-    curve = {"10_0": result["runs"]["normal"]["full"]["metrics"]}
+def coverage_metrics(result, group="full"):
+    curve = {"10_0": result["runs"]["normal"][group]["metrics"]}
     for split, row in result["splits"].items():
-        curve[split] = row["mean_metrics"]
+        curve[split] = row["mean_metrics"] if group == "full" else row["subset_metrics"][group]
     return curve
 
 
@@ -216,8 +236,15 @@ def main() -> None:
         scene: run_scene(args, scene, frame_map[scene], dataset, predictor)
         for scene in dict.fromkeys(args.scenes)
     }
-    report = aggregate(list(per_scene.values()))
-    report["per_scene"] = per_scene
+    report = {}
+    for group in ("full", "clean_only", "blurred_only"):
+        curves = {scene: scores[group] for scene, scores in per_scene.items()}
+        summary = aggregate(list(curves.values()))
+        summary["per_scene"] = curves
+        if group == "full":
+            report.update(summary)
+        else:
+            report[group] = summary
     output = args.output_dir / "coverage_metrics.json"
     output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 

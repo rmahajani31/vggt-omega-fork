@@ -138,16 +138,15 @@ def pose_metrics(rotation: np.ndarray, translation: np.ndarray) -> dict[str, flo
     }
 
 
-def depth_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
+def frame_depth_metrics(predicted: np.ndarray, target: np.ndarray):
     if predicted.shape != target.shape:
         raise ValueError(f"depth shape mismatch: {predicted.shape} vs {target.shape}")
-    delta = []
-    abs_rel = []
     for predicted_frame, target_frame in zip(predicted, target):
         target_frame = target_frame.astype(np.float64, copy=True)
         predicted_frame = predicted_frame.astype(np.float64, copy=True)
         mask = np.isfinite(target_frame) & (target_frame > 0.1) & (target_frame < 100.0)
         if mask.sum() < 10:
+            yield None
             continue
         target_frame = np.clip(target_frame, 0.1, 100.0)
         predicted_frame = np.clip(predicted_frame, 0.1, 100.0)
@@ -159,12 +158,16 @@ def depth_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]
         shift = np.median(target_frame[mask] - scale * predicted_frame[mask])
         aligned = np.clip((predicted_frame * scale + shift)[mask], 1e-6, None)
         target_values = target_frame[mask]
-        abs_rel.append(float(np.mean(np.abs(aligned - target_values) / target_values)))
+        abs_rel = float(np.mean(np.abs(aligned - target_values) / target_values))
         ratio = np.maximum(aligned / target_values, target_values / aligned)
-        delta.append(float(np.mean(ratio < 1.25)))
-    if not delta:
+        yield {"delta125": float(np.mean(ratio < 1.25)), "AbsRel": abs_rel}
+
+
+def depth_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
+    rows = [row for row in frame_depth_metrics(predicted, target) if row is not None]
+    if not rows:
         raise ValueError("no valid depth frames")
-    return {"delta125": float(np.mean(delta)), "AbsRel": float(np.mean(abs_rel))}
+    return {key: float(np.mean([row[key] for row in rows])) for key in rows[0]}
 
 
 def crop_depth(

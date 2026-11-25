@@ -98,3 +98,14 @@ AUC and delta125 are percentages (higher is better). Lower AbsRel is better.
 
 In the dataset averages, trials have equal weight within each blur level
 and each scene has equal weight.
+
+Each trial runs the model once on all ten inputs. Its `full`, `clean_only`, and
+`blurred_only` scores use the corresponding frames from that prediction. Depth
+is averaged over valid frames. Subset pose AUC uses pairs with both cameras in
+the subset; mixed clean/blurred pairs contribute only to the full score.
+An empty subset has null metrics. A single scored frame has depth metrics
+when valid, and null pose AUC because it has no camera pair. Unavailable
+values are excluded from means and an entirely unavailable mean is null.
+In `coverage_metrics.json`, the top-level splits and `per_scene` contain full
+scores. The `clean_only` and `blurred_only` sections each contain the same
+splits and their own `per_scene` scores.

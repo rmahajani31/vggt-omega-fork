@@ -20,3 +20,27 @@ training/curation/**/*.joblib
 training/curation/**/*.jsonl
 training/curation/**/*.pkl
 training/curation/**/labels*.txt
+
+# Local settings, datasets, and generated experiment artifacts
+.vscode/
+.idea/
+*.json
+*.jsonl
+*.csv
+*.tsv
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.svg
+*.mp4
+*.npy
+*.npz
+*.ply
+*.log
+/data/
+debug-motion-blur/

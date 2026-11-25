@@ -185,3 +185,17 @@ def resize_depth(predicted: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
         tensor, shape, mode="bilinear", align_corners=False, antialias=True
     )
     return resized.squeeze(1).numpy()
+
+
+def score_scene(
+    predicted_depth: np.ndarray,
+    predicted_extrinsics: np.ndarray,
+    crop: tuple[float, float, float, float],
+    target_depth: np.ndarray,
+    target_extrinsics: np.ndarray,
+) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
+    target_depth = crop_depth(target_depth, crop)
+    predicted_depth = resize_depth(predicted_depth, target_depth.shape[-2:])
+    depth = depth_metrics(predicted_depth, target_depth)
+    rotation, translation = pose_errors(predicted_extrinsics, target_extrinsics)
+    return depth, rotation, translation

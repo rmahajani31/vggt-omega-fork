@@ -57,6 +57,13 @@ class Predictor:
     def predict(
         self, image_paths: list[str]
     ) -> tuple[np.ndarray, np.ndarray, tuple[float, float, float, float]]:
+        images, crop = self.prepare_images(image_paths)
+        return self.predict_prepared(images, crop)
+
+    @staticmethod
+    def prepare_images(
+        image_paths: list[str],
+    ) -> tuple[torch.Tensor, tuple[float, float, float, float]]:
         crop = _source_crop(image_paths)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -68,6 +75,11 @@ class Predictor:
             )
         if any("padding" in str(item.message) for item in caught):
             raise ValueError("input frames require padding")
+        return images, crop
+
+    def predict_prepared(
+        self, images: torch.Tensor, crop: tuple[float, float, float, float],
+    ) -> tuple[np.ndarray, np.ndarray, tuple[float, float, float, float]]:
         images = images.to(self.device)
         with torch.inference_mode():
             prediction = self.model(images)

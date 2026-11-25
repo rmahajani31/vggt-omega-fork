@@ -20,11 +20,8 @@ sys.path.insert(0, str(ROOT))
 
 Dataset = importlib.import_module("datasets").Dataset
 metric_module = importlib.import_module("metrics")
-crop_depth = metric_module.crop_depth
-depth_metrics = metric_module.depth_metrics
-pose_errors = metric_module.pose_errors
 pose_metrics = metric_module.pose_metrics
-resize_depth = metric_module.resize_depth
+score_scene = metric_module.score_scene
 Predictor = importlib.import_module("model").Predictor
 
 
@@ -66,10 +63,9 @@ def main() -> int:
         predicted_depth, predicted_extrinsics, crop = predictor.predict(
             batch.image_paths
         )
-        target_depth = crop_depth(batch.depth, crop)
-        predicted_depth = resize_depth(predicted_depth, target_depth.shape[-2:])
-        depth = depth_metrics(predicted_depth, target_depth)
-        rotation, translation = pose_errors(predicted_extrinsics, batch.extrinsics)
+        depth, rotation, translation = score_scene(
+            predicted_depth, predicted_extrinsics, crop, batch.depth, batch.extrinsics
+        )
         rotations.append(rotation)
         translations.append(translation)
         frame_names[scene] = batch.frame_names

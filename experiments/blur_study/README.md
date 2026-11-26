@@ -28,10 +28,11 @@ python experiments/blur_study/dataset_prep/convert_mvssynth.py --workers 6
 
 The converter writes selected recordings under `data/unified/mvssynth/`. Use `--scenes 0000` to convert a single recording. See the [MVS-Synth mapping](dataset_prep/MAPPING.md#mvs-synth-gtav_540).
 
-## Build the shared schedule
+## Build the shared schedule and prepare source validation
 
 ```bash
 test -f experiments/blur_study/schedule.json || python experiments/blur_study/build_schedule.py
+python eval/prepare_source_val.py                    # -> data/source_val/, eval/frames/source_val.json
 ```
 
 The schedule fixes all of the following for every recipe:

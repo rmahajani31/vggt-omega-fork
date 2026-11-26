@@ -46,4 +46,8 @@ training/curation/**/labels*.txt
 !/data/vggt_omega_train_validation_v2.csv
 debug-motion-blur/
 
+# Blur study: generated files that must travel with the code so every recipe and machine
+# uses the same schedule, eval frames and uCO3D shard locations.
+!/experiments/blur_study/schedule.json
+!/eval/frames/source_val.json
 !/experiments/blur_study/dataset_prep/uco3d_shard_index.json

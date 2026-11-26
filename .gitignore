@@ -42,5 +42,8 @@ training/curation/**/labels*.txt
 *.npz
 *.ply
 *.log
-/data/
+/data/*
+!/data/vggt_omega_train_validation_v2.csv
 debug-motion-blur/
+
+!/experiments/blur_study/dataset_prep/uco3d_shard_index.json

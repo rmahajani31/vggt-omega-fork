@@ -17,3 +17,13 @@ python experiments/blur_study/dataset_prep/convert_hypersim.py --workers 6
 ```
 
 Each selected camera trajectory is written under `data/unified/hypersim/`. Use `--scenes ai_001_001_cam_00` to convert a single recording. See [the Hypersim mapping](dataset_prep/MAPPING.md#hypersim) for camera and depth conventions.
+
+## Convert MVS-Synth
+
+Place the raw GTAV_540 recording directories under `data/mvs-synth/`. Run from `vggt-omega/`.
+
+```bash
+python experiments/blur_study/dataset_prep/convert_mvssynth.py --workers 6
+```
+
+The converter writes selected recordings under `data/unified/mvssynth/`. Use `--scenes 0000` to convert a single recording. See the [MVS-Synth mapping](dataset_prep/MAPPING.md#mvs-synth-gtav_540).

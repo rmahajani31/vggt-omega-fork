@@ -7,6 +7,7 @@ import json
 import os
 import random
 import shutil
+from math import comb
 from pathlib import Path
 from statistics import fmean
 
@@ -16,44 +17,40 @@ import torch
 
 from evaluate import Dataset, Predictor, REPOSITORY, ROOT
 from metrics import crop_depth, frame_depth_metrics, pose_errors, pose_metrics, resize_depth
+from vggt_omega.utils.synthetic_blur import (
+    DEFAULT_BLUR_PX,
+    DEFAULT_REFERENCE_WIDTH,
+    blur_source_image,
+)
 
 
-ORIGINAL_COUNTS = (2, 3, 4, 5)
+BLUR_COUNTS = (1, 2, 3, 4, 5)
 ASSIGNMENTS = 10
-KERNEL = (61, 1)
-SINTEL_IMAGE_WIDTH = 846
-BLUR_WIDTH_FRACTION = KERNEL[0] / SINTEL_IMAGE_WIDTH
-RESULT_FOLDERS = {"sintel": "sintel_sequences_61px", "eth3d": "eth3d_sequences_61px_width_matched"}
+DATASETS = ("sintel", "eth3d", "source_val")
 
 
 def sample_assignments(eligible: list[int], first_seed: int) -> dict[int, dict[int, list[int]]]:
-    """Return distinct sets per ratio, retaining the original four-ratio cohort."""
-    assignments = {}
-    seen = {count: set() for count in ORIGINAL_COUNTS}
-    seed = first_seed
-    while len(assignments) < ASSIGNMENTS:
-        order = random.Random(seed).sample(eligible, len(eligible))
-        subsets = {count: frozenset(order[:count]) for count in ORIGINAL_COUNTS}
-        if all(subset not in seen[count] for count, subset in subsets.items()):
-            assignments[seed] = order
-            for count, subset in subsets.items():
-                seen[count].add(subset)
-        seed += 1
-    # The fixed clean first view leaves nine possible single-view trials.
-    single_trials = {}
-    remaining = set(eligible)
-    seed = first_seed
-    while remaining:
-        position = random.Random(seed).choice(eligible)
-        if position in remaining:
-            single_trials[seed] = [position]
-            remaining.remove(position)
-        seed += 1
-    by_count = {1: single_trials}
-    by_count.update({
-        count: {seed: order[:count] for seed, order in assignments.items()}
-        for count in ORIGINAL_COUNTS
-    })
+    """Sample distinct blur sets, sharing seeds across counts with the same trial limit."""
+    counts_by_limit = {}
+    for count in BLUR_COUNTS:
+        limit = min(ASSIGNMENTS, comb(len(eligible), count))
+        counts_by_limit.setdefault(limit, []).append(count)
+
+    by_count = {}
+    for limit, counts in counts_by_limit.items():
+        assignments = {}
+        seen = {count: set() for count in counts}
+        seed = first_seed
+        while len(assignments) < limit:
+            order = random.Random(seed).sample(eligible, len(eligible))
+            subsets = {count: frozenset(order[:count]) for count in counts}
+            if all(subset not in seen[count] for count, subset in subsets.items()):
+                assignments[seed] = order
+                for count, subset in subsets.items():
+                    seen[count].add(subset)
+            seed += 1
+        for count in counts:
+            by_count[count] = {seed: order[:count] for seed, order in assignments.items()}
     return by_count
 
 
@@ -65,15 +62,15 @@ def mean_metrics(rows):
     return means
 
 
-def write_blurred(source: str, destination: Path) -> int:
+def write_blurred(source: str, destination: Path, blur_px: float = DEFAULT_BLUR_PX,
+                  reference_width: float = DEFAULT_REFERENCE_WIDTH) -> int:
     image = cv2.imread(source, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     if image is None:
         raise ValueError(f"Unable to read {source}")
-    source_width = BLUR_WIDTH_FRACTION * image.shape[1]
-    kernel_width = max(1, 2 * round((source_width - 1) / 2) + 1)
-    blurred = cv2.blur(image, (kernel_width, 1), borderType=cv2.BORDER_REFLECT_101)
-    if np.array_equal(image, blurred):
-        raise ValueError(f"Blur did not change {source}")
+    try:
+        blurred, kernel_width = blur_source_image(image, blur_px, reference_width, strict=True)
+    except ValueError as error:
+        raise ValueError(f"Blur did not change {source}") from error
     if not cv2.imwrite(str(destination), blurred):
         raise OSError(f"Unable to save {destination}")
     return kernel_width
@@ -125,7 +122,8 @@ def run_scene(args, scene, indices, dataset, predictor):
     for i in sorted(selected_positions):
         filename = batch.frame_names[i]
         path = variants_dir / Path(filename).with_suffix(".png")
-        kernels[filename] = write_blurred(batch.image_paths[i], path)
+        kernels[filename] = write_blurred(batch.image_paths[i], path, args.blur_px,
+                                          args.reference_width)
         variant_paths[i] = str(path)
     blur_inputs, blur_crop = predictor.prepare_images(variant_paths)
     if clean_inputs.shape != blur_inputs.shape or crop != blur_crop:
@@ -163,12 +161,13 @@ def run_scene(args, scene, indices, dataset, predictor):
 
     result = {
         "dataset": args.dataset, "scene": scene, "seed": args.seed,
-        "checkpoint": args.checkpoint.name,
+        "model_name": args.model_name, "checkpoint": args.checkpoint.name,
         "environment": {"torch": torch.__version__, "opencv": cv2.__version__,
                         "numpy": np.__version__, "device": args.device},
         "blur": {"kernel_xy": [next(iter(kernels.values())), 1] if len(set(kernels.values())) == 1 else None,
-                 "source_kernel_widths": kernels, "reference_image_width": SINTEL_IMAGE_WIDTH,
-                 "target_width_fraction": BLUR_WIDTH_FRACTION, "reference_kernel_width": KERNEL[0],
+                 "source_kernel_widths": kernels, "reference_image_width": args.reference_width,
+                 "target_width_fraction": args.blur_px / args.reference_width,
+                 "reference_kernel_width": args.blur_px,
                  "border": "BORDER_REFLECT_101",
                  "stage": "prepared RGB, before predictor preprocessing"},
         "frames": [
@@ -202,22 +201,31 @@ def aggregate(curves):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=("sintel", "eth3d"), default="sintel")
+    parser.add_argument("--dataset", choices=DATASETS, default="sintel")
     parser.add_argument("--scenes", nargs="+")
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--checkpoint", type=Path,
                         default=REPOSITORY / "checkpoint/vggt_omega_1b_416_reproduce.pt")
-    parser.add_argument("--output-dir", type=Path, help="Directory cleared before each run")
+    parser.add_argument("--model-name", default="original",
+                        help="label for this checkpoint in outputs/blur_study/<dataset>/<model-name>")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--overwrite", action="store_true",
+                        help="delete an existing, non-empty output directory first")
+    parser.add_argument("--blur-px", type=float, default=DEFAULT_BLUR_PX,
+                        help="kernel width at the reference width (study severity: 31)")
+    parser.add_argument("--reference-width", type=float, default=DEFAULT_REFERENCE_WIDTH)
+    parser.add_argument("--frames", type=Path, help="frame map JSON (default eval/frames/<dataset>.json)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
-    frame_map = json.loads((ROOT / "frames" / f"{args.dataset}.json").read_text())
+    args.frames = args.frames or ROOT / "frames" / f"{args.dataset}.json"
+    frame_map = json.loads(args.frames.read_text())
     args.scenes = args.scenes or list(frame_map)
     unknown = set(args.scenes).difference(frame_map)
     if unknown:
         parser.error(f"Unknown {args.dataset} scenes: {sorted(unknown)}")
     if args.output_dir is None:
-        args.output_dir = REPOSITORY / "outputs/motion_blur" / RESULT_FOLDERS[args.dataset]
+        args.output_dir = REPOSITORY / "outputs/blur_study" / args.dataset / args.model_name
     args.data_root = args.data_root or REPOSITORY / "data" / args.dataset
     dataset = Dataset(args.data_root)
     predictor = Predictor(args.checkpoint, args.device)
@@ -228,9 +236,11 @@ def main() -> None:
             or output_dir.is_relative_to(args.data_root.resolve())
             or output_dir.is_relative_to(ROOT)):
         parser.error(f"Unsafe output directory: {args.output_dir}")
-    if output_dir.exists():
+    if output_dir.exists() and any(output_dir.iterdir()):
+        if not args.overwrite:
+            parser.error(f"{output_dir} is not empty; pass --overwrite to replace it")
         shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     args.output_dir = output_dir
     per_scene = {
         scene: run_scene(args, scene, frame_map[scene], dataset, predictor)
@@ -245,6 +255,13 @@ def main() -> None:
             report.update(summary)
         else:
             report[group] = summary
+    report["meta"] = {
+        "dataset": args.dataset, "model_name": args.model_name,
+        "checkpoint": str(args.checkpoint), "seed": args.seed,
+        "blur_px": args.blur_px, "reference_width": args.reference_width,
+        "scenes": list(per_scene), "frames": str(args.frames),
+        "aggregation": "placements averaged within each scene, then scenes weighted equally",
+    }
     output = args.output_dir / "coverage_metrics.json"
     output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 

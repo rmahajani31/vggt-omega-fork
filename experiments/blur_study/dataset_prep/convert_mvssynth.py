@@ -40,7 +40,7 @@ def build(scene: str, args: dict):
     root = Path(args["source"]) / scene
     ids = sorted(p.stem for p in (root / "images").glob("*.png"))
     frames, skipped = [], []
-    for i, frame_id in enumerate(ids):
+    for frame_id in ids:
         depth_path, pose_path = root / "depths" / f"{frame_id}.exr", root / "poses" / f"{frame_id}.json"
         if not depth_path.is_file() or not pose_path.is_file():
             skipped.append((frame_id, "missing depth or pose"))

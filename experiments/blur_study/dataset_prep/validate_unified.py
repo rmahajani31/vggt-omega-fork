@@ -79,7 +79,6 @@ def loader_probe(dataset_key: str, root: Path, scenes: list[str], seeds=(0, 1)) 
 
     os.chdir(REPOSITORY / "training")
     sys.path.insert(0, str(REPOSITORY / "training"))
-    from hydra.utils import instantiate
     from launch import load_config
 
     cfg = load_config("blur_study")

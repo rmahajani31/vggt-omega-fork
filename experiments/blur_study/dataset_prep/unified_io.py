@@ -1,12 +1,150 @@
+"""Write and validate scenes in the VGGT-Omega unified layout (training/README.md section 2).
+
+Implements the contract in training/dataset_preparation/download_and_convert.md:
+  * one directory per scene with images/, depths/<stem>.exr, image_names.json,
+    cam_from_worlds.npy (N x 3 x 4, OpenCV camera-from-world) and intrinsics.npy (N x 3 x 3);
+  * depth is float32 planar z in metres, every invalid value stored as exactly 0;
+  * each scene is staged outside the dataset root, validated there and published with an
+    atomic rename; a completion record (converter version, config hash, counts, validation)
+    is written last, outside the dataset root, so reruns resume safely.
+"""
+
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
+
+
+@dataclass
+class Frame:
+    name: str                      # output image file name, e.g. 00000.png
+    cam_from_world: np.ndarray     # 3x4 (or 4x4), OpenCV
+    K: np.ndarray                  # 3x3
+    depth: np.ndarray              # HxW float, invalid <= 0 / non-finite
+    image_path: Path | None = None  # copied verbatim when given (no re-encode)
+    image: np.ndarray | None = None  # RGB uint8 HxWx3, encoded losslessly when given
+    source_id: str = ""
+
+
+@dataclass
+class SceneResult:
+    scene: str
+    status: str                    # converted | skipped | failed
+    frames: int = 0
+    skipped_frames: list = field(default_factory=list)
+    error: str = ""
+    validation: dict = field(default_factory=dict)
+
+
+def config_hash(config: dict) -> str:
+    return hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def exr_roundtrip_probe(tmp_dir: Path) -> None:
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    probe = np.array([[0.0, 1.5], [1234.25, 0.001]], dtype=np.float32)
+    path = tmp_dir / "probe.exr"
+    if not cv2.imwrite(str(path), probe):
+        raise RuntimeError("OpenCV cannot write EXR; set OPENCV_IO_ENABLE_OPENEXR=1 before importing cv2")
+    back = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    path.unlink()
+    if back is None or back.dtype != np.float32 or not np.array_equal(back, probe):
+        raise RuntimeError("EXR float32 round-trip failed")
+
+
+def clean_depth(depth: np.ndarray) -> np.ndarray:
+    depth = np.asarray(depth, dtype=np.float32)
+    return np.where(np.isfinite(depth) & (depth > 0), depth, 0).astype(np.float32)
+
+
+def record_path(records_root: Path, scene: str) -> Path:
+    return records_root / f"{scene}.json"
+
+
+def is_complete(dest_root: Path, records_root: Path, scene: str, version: str, cfg_hash: str) -> bool:
+    record = record_path(records_root, scene)
+    if not record.is_file() or not (dest_root / scene / "image_names.json").is_file():
+        return False
+    data = json.loads(record.read_text(encoding="utf-8"))
+    return (data.get("status") == "converted" and data.get("converter_version") == version
+            and data.get("config_hash") == cfg_hash)
+
+
+def write_scene(dest_root: Path, records_root: Path, scene: str, frames: Iterable[Frame],
+                *, version: str, cfg_hash: str, provenance: dict, overwrite: bool = False) -> SceneResult:
+    dest_root, records_root = Path(dest_root), Path(records_root)
+    final = dest_root / scene
+    if final.exists() and not overwrite:
+        if is_complete(dest_root, records_root, scene, version, cfg_hash):
+            return SceneResult(scene, "skipped")
+        raise FileExistsError(f"{final} exists without a matching completion record; use --overwrite")
+    staging_root = dest_root.parent / "_staging" / dest_root.name
+    staging = staging_root / f"{scene}.{os.getpid()}.{int(time.time())}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    (staging / "images").mkdir(parents=True)
+    (staging / "depths").mkdir()
+
+    names, poses, intrinsics, sources = [], [], [], []
+    for frame in frames:
+        stem = Path(frame.name).stem
+        if frame.image_path is not None:
+            shutil.copyfile(frame.image_path, staging / "images" / frame.name)
+        elif frame.image is not None:
+            ok = cv2.imwrite(str(staging / "images" / frame.name), frame.image[:, :, ::-1])
+            if not ok:
+                raise OSError(f"Failed to write {frame.name}")
+        else:
+            raise ValueError(f"Frame {frame.name} has no image")
+        depth = clean_depth(frame.depth)
+        if not cv2.imwrite(str(staging / "depths" / f"{stem}.exr"), depth):
+            raise OSError(f"Failed to write depth for {frame.name}")
+        back = cv2.imread(str(staging / "depths" / f"{stem}.exr"), cv2.IMREAD_UNCHANGED)
+        if back is None or not np.array_equal(back, depth):
+            raise OSError(f"Depth round-trip failed for {frame.name}")
+        names.append(frame.name)
+        poses.append(np.asarray(frame.cam_from_world, dtype=np.float64)[:3, :4])
+        intrinsics.append(np.asarray(frame.K, dtype=np.float64))
+        sources.append(frame.source_id)
+    if not names:
+        shutil.rmtree(staging)
+        raise ValueError(f"Scene {scene} has no frames")
+    (staging / "image_names.json").write_text(json.dumps(names), encoding="utf-8")
+    np.save(staging / "cam_from_worlds.npy", np.stack(poses).astype(np.float32))
+    np.save(staging / "intrinsics.npy", np.stack(intrinsics).astype(np.float32))
+
+    validation = validate_scene(staging)
+    if validation["errors"]:
+        raise ValueError(f"Staged scene {scene} failed validation: {validation['errors'][:5]}")
+
+    backup = None
+    if final.exists():
+        backup = final.with_name(final.name + ".bak")
+        if backup.exists():
+            shutil.rmtree(backup)
+        final.rename(backup)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    staging.rename(final)
+    if backup is not None:
+        shutil.rmtree(backup)
+    records_root.mkdir(parents=True, exist_ok=True)
+    record = {
+        "scene": scene, "status": "converted", "converter_version": version, "config_hash": cfg_hash,
+        "frames": len(names), "source_frames": sources, "provenance": provenance,
+        "validation": validation, "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    record_path(records_root, scene).write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
+    return SceneResult(scene, "converted", frames=len(names), validation=validation)
 
 
 def validate_scene(scene_dir: Path, full: bool = True) -> dict:

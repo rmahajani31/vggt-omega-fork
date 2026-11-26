@@ -27,3 +27,24 @@ python experiments/blur_study/dataset_prep/convert_mvssynth.py --workers 6
 ```
 
 The converter writes selected recordings under `data/unified/mvssynth/`. Use `--scenes 0000` to convert a single recording. See the [MVS-Synth mapping](dataset_prep/MAPPING.md#mvs-synth-gtav_540).
+
+## Build the shared schedule
+
+```bash
+test -f experiments/blur_study/schedule.json || python experiments/blur_study/build_schedule.py
+```
+
+The schedule fixes all of the following for every recipe:
+
+- **Passes:** 5 passes over the 450 training recordings. Each pass visits every recording once, in 150 batches of 3 sequences.
+- **Batch shape:** a discrete aspect ratio per batch, with the 416² pixel budget.
+- **Per sample:**
+  - 10 frame ids, drawn with each dataset's native `UnifiedDataset` sampler
+  - an augmentation seed
+  - a permutation of views 1–9
+  - each recipe's blur count:
+    - fixed: 2
+    - variable: exactly 150 each of 1/2/3 per pass
+    - clean-or-4: exactly 225 each of 0/4 per pass
+
+  A recipe blurs the first *count* views of that permutation.

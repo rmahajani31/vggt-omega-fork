@@ -1,0 +1,63 @@
+# Dataset settings shared by the blur-study training loader and validation probe.
+defaults:
+  - default_dataset.yaml
+  - _self_
+
+data:
+  train:
+    dataset:
+      dataset_configs:
+        uco3d:
+          # Authors' uco3d entry from default.yaml, verbatim except paths.
+          _target_: data.datasets.unified.UnifiedDataset
+          UNIFIED_DIR: ${oc.env:BLUR_STUDY_DATA,../data/unified}/uco3d
+          sequence_list_file: ${oc.env:BLUR_STUDY_DIR,../experiments/blur_study}/splits/uco3d_train.txt
+          dataset_prefix: _uco3d
+          is_synthetic: false
+          mixture_weight: 152
+          mixture_weight_scale: 1.0
+          frame_window: 256
+          max_interval: 64
+          max_interval_ratio: -1
+          max_depth: 256
+          sample_by_index: true
+          revisit_policy: avoid_if_possible
+        hypersim:
+          # The authors released no Hypersim entry; this mirrors their synthetic (EDEN) entry,
+          # with sample_by_index: true because no ranking.npy is distributed.
+          _target_: data.datasets.unified.UnifiedDataset
+          UNIFIED_DIR: ${oc.env:BLUR_STUDY_DATA,../data/unified}/hypersim
+          sequence_list_file: ${oc.env:BLUR_STUDY_DIR,../experiments/blur_study}/splits/hypersim_train.txt
+          dataset_prefix: _hypersim
+          is_synthetic: true
+          mixture_weight: 177
+          mixture_weight_scale: 1.0
+          frame_window: 80
+          frame_window_policy: frame_count_power_law
+          max_interval_ratio: -1
+          jump_prob: 0
+          sample_by_index: true
+          revisit_policy: avoid_if_possible
+        mvssynth:
+          # Same EDEN-style synthetic entry as hypersim.
+          _target_: data.datasets.unified.UnifiedDataset
+          UNIFIED_DIR: ${oc.env:BLUR_STUDY_DATA,../data/unified}/mvssynth
+          sequence_list_file: ${oc.env:BLUR_STUDY_DIR,../experiments/blur_study}/splits/mvssynth_train.txt
+          dataset_prefix: _mvssynth
+          is_synthetic: true
+          mixture_weight: 177
+          mixture_weight_scale: 1.0
+          frame_window: 80
+          frame_window_policy: frame_count_power_law
+          max_interval_ratio: -1
+          jump_prob: 0
+          sample_by_index: true
+          revisit_policy: avoid_if_possible
+    common_config:
+      # BLUR STUDY: ten views per sample; the scheduled loader fixes the sequence, frames and
+      # aspect ratio, so random sequence selection is disabled. Batch size (3 sequences, the
+      # authors' FRAME_COUNT_TO_BATCH_SIZE[10]) is stored in the schedule.
+      frames_per_sample_range: [10, 10]
+      fix_img_num: 10
+      inside_random: false
+      # img_size: 416 and the augmentation block are inherited unchanged from default_dataset.yaml.

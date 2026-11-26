@@ -263,6 +263,25 @@ class UnifiedDataset(BaseDataset):
             return REVISIT_POLICY_ALLOW
         return self.revisit_policy
 
+    def load_image_names(self, seq_name):
+        image_names_path = osp.join(self.UNIFIED_DIR, seq_name, self.image_names_filename)
+        try:
+            with open(image_names_path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Error decoding JSON from {image_names_path}") from e
+
+    def sample_frame_ids(self, seq_name, img_per_seq, ids=None, image_names=None):
+        """Draw frame indices exactly as get_data does, using the global random/np.random.
+
+        The blur study calls this under a fixed seed to precompute one frame list per sample
+        that every recipe then reuses verbatim through ``get_data(..., exact_ids=True)``.
+        """
+        if image_names is None:
+            image_names = self.load_image_names(seq_name)
+        return self._sample_ids(seq_name, osp.join(self.UNIFIED_DIR, seq_name),
+                                len(image_names), img_per_seq, ids)
+
     def get_data(
         self,
         seq_index=None,
@@ -270,7 +289,9 @@ class UnifiedDataset(BaseDataset):
         seq_name=None,
         ids=None,
         aspect_ratio=1.0,
+        exact_ids=False,
     ):
+        """Load one multi-view sample, using the supplied frame indices verbatim when exact_ids is set."""
         if self.inside_random:
             seq_index = random.randint(0, self.sequence_list_len - 1)
 
@@ -279,17 +300,23 @@ class UnifiedDataset(BaseDataset):
 
         # Load scene metadata from separate files
         seq_path = osp.join(self.UNIFIED_DIR, seq_name)
-
-        # Load image_names from JSON file
-        image_names_path = osp.join(seq_path, self.image_names_filename)
-        try:
-            with open(image_names_path, "r") as f:
-                image_names = json.load(f)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Error decoding JSON from {image_names_path}") from e
-
+        image_names = self.load_image_names(seq_name)
         num_imgs = len(image_names)
 
+        if exact_ids:
+            if ids is None:
+                raise ValueError("exact_ids=True requires ids")
+            ids = np.asarray(ids, dtype=np.int64)
+            if img_per_seq is not None and len(ids) != img_per_seq:
+                raise ValueError(f"Expected {img_per_seq} ids for {seq_name}, got {len(ids)}")
+            if ids.min() < 0 or ids.max() >= num_imgs:
+                raise IndexError(f"Frame ids out of range for {seq_name} ({num_imgs} frames)")
+        else:
+            ids = self._sample_ids(seq_name, seq_path, num_imgs, img_per_seq, ids)
+
+        return self._load_views(seq_name, seq_path, image_names, ids, aspect_ratio)
+
+    def _sample_ids(self, seq_name, seq_path, num_imgs, img_per_seq, ids=None):
         if num_imgs < 3:
             logging.warning("Sequence %s has fewer than three images", seq_name)
 
@@ -339,8 +366,10 @@ class UnifiedDataset(BaseDataset):
         # Restore original indices and num_imgs after skip
         if skip > 0:
             ids = ids + skip
-            num_imgs = num_imgs + skip
+        return ids
 
+    def _load_views(self, seq_name, seq_path, image_names, ids, aspect_ratio):
+        num_imgs = len(image_names)
         if not self.per_frame_anno:
             # Load cam_from_worlds from NPY file
             cam_from_worlds_path = osp.join(seq_path, self.cam_from_worlds_filename)

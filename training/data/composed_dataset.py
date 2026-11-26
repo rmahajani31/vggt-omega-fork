@@ -32,6 +32,10 @@ class ComposedDataset(Dataset):
             instantiate(config, common_conf=common_config) for config in configs
         ]
         self.base_dataset = TupleConcatDataset(datasets, common_config)
+        if hasattr(dataset_configs, "keys"):
+            self.datasets_by_key = dict(zip(dataset_configs.keys(), datasets))
+        else:
+            self.datasets_by_key = {}
 
         self.cojitter = common_config.augs.cojitter
         self.cojitter_ratio = common_config.augs.cojitter_ratio
@@ -80,6 +84,10 @@ class ComposedDataset(Dataset):
             )
 
         batch = self.base_dataset[idx_tuple]
+        return self.postprocess(batch)
+
+    def postprocess(self, batch):
+        """Photometric augmentation, tensor assembly, tracks and normalization for one sample."""
         images = torch.from_numpy(np.stack(batch["images"]))
         images = (
             images.permute(0, 3, 1, 2).to(dtype=torch.get_default_dtype()).div_(255)

@@ -74,3 +74,10 @@ The study adds:
 On the local Ada, peak memory at batch 3 was 16 GB.
 
 Each run writes `training/logs/blur_study_<recipe>/checkpoints/model_merged.pt`. `export_merged.py` rebuilds merged weights from checkpoint.pt, verifies strict loading, and writes them to `checkpoint/blur_study/<recipe>.pt`.
+
+## 4. Evaluate and summarize
+
+```bash
+bash eval/run_study_eval.sh     # original + 4 recipes x {source_val, sintel, eth3d}, 31 px @ 846
+# -> outputs/blur_study/summary/{source_val,sintel,eth3d}.{md,csv}
+```

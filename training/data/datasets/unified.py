@@ -22,6 +22,7 @@ from data.dataset_util import (
     threshold_depth_map,
 )
 from data.base_dataset import BaseDataset
+from vggt_omega.utils.synthetic_blur import blur_source_image
 from data.datasets.unified_helper import (
     LazyIndexRanking,
     FRAME_COUNT_POWER_LAW_POLICY,
@@ -290,8 +291,17 @@ class UnifiedDataset(BaseDataset):
         ids=None,
         aspect_ratio=1.0,
         exact_ids=False,
+        blur_views=None,
+        blur_cfg=None,
     ):
-        """Load one multi-view sample, using the supplied frame indices verbatim when exact_ids is set."""
+        """Load one multi-view sample.
+
+        Blur study additions:
+          exact_ids: use ``ids`` verbatim (one entry per view) instead of as a sampling anchor.
+          blur_views: positions in ``ids`` whose source-resolution RGB is motion-blurred
+            before any crop or resize; targets are untouched.
+          blur_cfg: mapping with ``blur_px`` and ``reference_width`` for the blur severity.
+        """
         if self.inside_random:
             seq_index = random.randint(0, self.sequence_list_len - 1)
 
@@ -314,7 +324,12 @@ class UnifiedDataset(BaseDataset):
         else:
             ids = self._sample_ids(seq_name, seq_path, num_imgs, img_per_seq, ids)
 
-        return self._load_views(seq_name, seq_path, image_names, ids, aspect_ratio)
+        blur_positions = set(int(i) for i in (blur_views or ()))
+        if blur_positions and (min(blur_positions) < 0 or max(blur_positions) >= len(ids)):
+            raise IndexError(f"blur_views {sorted(blur_positions)} out of range for {len(ids)} views")
+        blur_cfg = dict(blur_cfg or {})
+        return self._load_views(seq_name, seq_path, image_names, ids, aspect_ratio,
+                                blur_positions, blur_cfg)
 
     def _sample_ids(self, seq_name, seq_path, num_imgs, img_per_seq, ids=None):
         if num_imgs < 3:
@@ -368,7 +383,8 @@ class UnifiedDataset(BaseDataset):
             ids = ids + skip
         return ids
 
-    def _load_views(self, seq_name, seq_path, image_names, ids, aspect_ratio):
+    def _load_views(self, seq_name, seq_path, image_names, ids, aspect_ratio,
+                    blur_positions, blur_cfg):
         num_imgs = len(image_names)
         if not self.per_frame_anno:
             # Load cam_from_worlds from NPY file
@@ -414,10 +430,17 @@ class UnifiedDataset(BaseDataset):
         ):
             shared_preprocess_params = self.sample_preprocess_params()
 
-        for idx in ids:
+        for position, idx in enumerate(ids):
             io_result = self._io_read(idx, seq_name, image_names)
 
             image, depth_map, img_path, depth_path, extri_frame, intri_frame = io_result
+
+            if position in blur_positions:
+                if image is None:
+                    raise ValueError(f"Cannot blur missing image {img_path}")
+                # Source resolution, before force crop / scale crop / resize, exactly like the
+                # evaluator, which blurs the image file before predictor preprocessing.
+                image, _ = blur_source_image(image, **blur_cfg)
 
             image, depth_map = _validate_image_depth_pair(
                 image, depth_map, img_path, depth_path, seq_name, idx

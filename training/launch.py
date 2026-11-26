@@ -21,8 +21,10 @@ def load_config(config_name: str = "default", overrides=None):
     # attribute access, which a plain dict does not support.
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
-    # exp_name only exists so other paths can interpolate ${exp_name}; it is not a Trainer argument.
+    # exp_name (and the blur study's recipe) only exist so other paths can interpolate them;
+    # they are not Trainer arguments.
     cfg.pop("exp_name", None)
+    cfg.pop("recipe", None)
     return cfg
 
 

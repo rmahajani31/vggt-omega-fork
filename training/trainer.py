@@ -58,6 +58,7 @@ from train_utils.general import (
     set_seeds,
 )
 from train_utils.logging import setup_logging
+from train_utils.lora import apply_lora, lora_state_dict, merge_lora
 from train_utils.optimizer import construct_optimizers
 from trainer_conf import (
     TrainerCheckpointConf,
@@ -95,8 +96,13 @@ class Trainer:
         fsdp_settings: Optional[Dict[str, Any]] = None,
         accum_steps: int = 1,
         start_epoch: int = 0,
+        lora: Optional[Dict[str, Any]] = None,
     ):
         self.accum_steps = accum_steps
+        # Blur study: optional LoRA fine-tuning. When enabled, the base weights are loaded
+        # before the adapters are inserted, so model_weight_path keeps its original key names.
+        self.lora_conf = lora if lora is not None and lora.get("enabled", False) else None
+        self._initial_weights_loaded = False
         self._setup_env_variables(env_variables)
         self._setup_timers()
 
@@ -216,6 +222,12 @@ class Trainer:
     def _setup_ddp_distributed_training(self, distributed_conf):
         assert not self._is_fsdp_training()
         assert isinstance(self.model, torch.nn.Module)
+
+        if distributed_conf.backend == "gloo" and dist.get_world_size() == 1:
+            # Blur study, Windows smoke tests: gloo cannot all-reduce CUDA gradients there, and
+            # with a single process DDP would only average over one rank anyway.
+            logging.info("Single-process gloo run: training without the DDP wrapper")
+            return
 
         ddp_options = dict(
             find_unused_parameters=distributed_conf.find_unused_parameters,
@@ -350,6 +362,9 @@ class Trainer:
                 strict=self.checkpoint_conf.dinov3_weight_strict,
             )
 
+        if self._initial_weights_loaded:
+            logging.info("Initial model weights were already loaded before inserting LoRA adapters")
+            return
         path = self.checkpoint_conf.model_weight_path
         if path is None:
             return
@@ -454,6 +469,21 @@ class Trainer:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
             self.epoch += 1
+
+        if self.lora_conf is not None:
+            self._save_lora_outputs()
+
+    def _save_lora_outputs(self):
+        """Write adapter weights and a merged, original-key state dict for evaluation."""
+        if self.rank != 0:
+            return
+        model = unwrap_ddp_if_wrapped(self.model)
+        folder = self.checkpoint_conf.save_dir
+        makedir(folder)
+        torch.save(lora_state_dict(model), os.path.join(folder, "lora_adapters.pt"))
+        merged_path = os.path.join(folder, "model_merged.pt")
+        torch.save(merge_lora(model), merged_path)
+        logging.info(f"Saved LoRA adapters and merged weights to {folder}")
 
     def train_epoch(self, train_loader):
         logging.info(f"Train Epoch Started: [{self.epoch}]")
@@ -777,6 +807,18 @@ class Trainer:
         self.tb_writer = instantiate(self.logging_conf.tensorboard_writer)
         self.model = instantiate(self.model_conf, _recursive_=False)
 
+        if self.lora_conf is not None:
+            # A resume checkpoint, if any, overwrites these weights later in load_checkpoint.
+            self._load_initial_model_weights()
+            self._initial_weights_loaded = True
+            apply_lora(
+                self.model,
+                target_patterns=list(self.lora_conf["target_modules"]),
+                r=int(self.lora_conf.get("r", 16)),
+                alpha=float(self.lora_conf.get("alpha", 32)),
+                dropout=float(self.lora_conf.get("dropout", 0.0)),
+                exclude_patterns=list(self.lora_conf.get("exclude_modules") or []),
+            )
 
         if self.optim_conf.frozen_module_names is not None:
             logging.info(

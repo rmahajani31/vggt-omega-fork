@@ -49,3 +49,28 @@ The schedule fixes all of the following for every recipe:
     - clean-or-4: exactly 225 each of 0/4 per pass
 
   A recipe blurs the first *count* views of that permutation.
+
+## 3. Train (Linux, NCCL, one recipe per GPU)
+
+```bash
+bash experiments/blur_study/run_linux.sh     # 2 GPUs: 2 recipes at a time; 1 GPU: sequential
+```
+
+Single recipe: `cd training && torchrun --standalone --nproc_per_node=1 launch.py --config blur_study recipe=fixed`.
+
+The config is `training/config/blur_study.yaml`. It uses the authors' benchmark recipe:
+- a 416² budget with the authors' augmentation block
+- AdamW at lr 2e-4, weight decay 0.05, betas (0.9, 0.95)
+- 5% warmup, then cosine decay
+- gradient clipping at 1.0, bf16, gradient checkpointing
+- loss weights from the released code
+- 3 sequences × 10 views per step, from `FRAME_COUNT_TO_BATCH_SIZE`
+
+The study adds:
+- LoRA (r=16, α=32) on the aggregator frame and global blocks and the camera head
+- 5 epochs × 150 steps
+- a start from `vggt_omega_1b_416_reproduce.pt`, loaded strictly
+
+On the local Ada, peak memory at batch 3 was 16 GB.
+
+Each run writes `training/logs/blur_study_<recipe>/checkpoints/model_merged.pt`. `export_merged.py` rebuilds merged weights from checkpoint.pt, verifies strict loading, and writes them to `checkpoint/blur_study/<recipe>.pt`.

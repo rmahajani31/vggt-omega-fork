@@ -300,7 +300,9 @@ class UnifiedDataset(BaseDataset):
           exact_ids: use ``ids`` verbatim (one entry per view) instead of as a sampling anchor.
           blur_views: positions in ``ids`` whose source-resolution RGB is motion-blurred
             before any crop or resize; targets are untouched.
-          blur_cfg: mapping with ``blur_px`` and ``reference_width`` for the blur severity.
+          blur_cfg: mapping with ``blur_px`` and ``reference_width`` for the blur severity, or
+            ``{"width_fractions": [...]}`` with one kernel width per view as a fraction of that
+            view's source image width (0 for sharp views, 0.02-0.10 for the blur_views).
         """
         if self.inside_random:
             seq_index = random.randint(0, self.sequence_list_len - 1)
@@ -328,6 +330,11 @@ class UnifiedDataset(BaseDataset):
         if blur_positions and (min(blur_positions) < 0 or max(blur_positions) >= len(ids)):
             raise IndexError(f"blur_views {sorted(blur_positions)} out of range for {len(ids)} views")
         blur_cfg = dict(blur_cfg or {})
+        fractions = blur_cfg.get("width_fractions")
+        if fractions is not None and (len(fractions) != len(ids) or
+                any(f != 0 and not 0.02 <= f <= 0.10 for f in fractions) or
+                {i for i, f in enumerate(fractions) if f > 0} != blur_positions):
+            raise ValueError("Invalid source-width fractions for selected views")
         return self._load_views(seq_name, seq_path, image_names, ids, aspect_ratio,
                                 blur_positions, blur_cfg)
 
@@ -440,7 +447,12 @@ class UnifiedDataset(BaseDataset):
                     raise ValueError(f"Cannot blur missing image {img_path}")
                 # Source resolution, before force crop / scale crop / resize, exactly like the
                 # evaluator, which blurs the image file before predictor preprocessing.
-                image, _ = blur_source_image(image, **blur_cfg)
+                if "width_fractions" in blur_cfg:
+                    source_width = image.shape[1]
+                    pixels = blur_cfg["width_fractions"][position] * source_width
+                    image, _ = blur_source_image(image, blur_px=pixels, reference_width=source_width)
+                else:
+                    image, _ = blur_source_image(image, **blur_cfg)
 
             image, depth_map = _validate_image_depth_pair(
                 image, depth_map, img_path, depth_path, seq_name, idx

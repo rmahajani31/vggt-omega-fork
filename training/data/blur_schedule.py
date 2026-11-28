@@ -26,6 +26,16 @@ MANIFEST_DATASETS = {"uCO3D": "uco3d", "Hypersim": "hypersim", "MVS-Synth": "mvs
 
 RECIPES = ("clean", "fixed", "variable", "clean_or_heavy")
 
+# Randomized-severity recipes, added by experiments/blur_study/build_width2to10_schedule.py on top
+# of the shared schedule. Each sample also carries ``width_fraction_by_view[recipe]``: one kernel
+# width per view as a fraction of that source image's width, drawn uniformly from
+# WIDTH_FRACTION_RANGE for blurred views and 0 for sharp ones.
+#   width2to10_a: the views `variable` blurs (150 each of 1/2/3 per pass), with random widths.
+#   width2to10_b: the same 900 widths per pass, redistributed to 45/90/135/180 recordings
+#                 with 0/1/2/3 blurred views.
+WIDTH_RECIPES = ("width2to10_a", "width2to10_b")
+WIDTH_FRACTION_RANGE = (0.02, 0.10)
+
 
 def stable_seed(*parts) -> int:
     """Deterministic 31-bit seed from arbitrary parts (independent of PYTHONHASHSEED)."""
@@ -172,6 +182,8 @@ def validate_schedule(schedule: Mapping, expected_recordings: set | None = None)
             "fixed": Counter({2: n}),
             "variable": Counter({1: n // 3, 2: n // 3, 3: n // 3}),
             "clean_or_heavy": Counter({0: n // 2, 4: n // 2}),
+            "width2to10_a": Counter({1: n // 3, 2: n // 3, 3: n // 3}),
+            "width2to10_b": Counter({0: n // 10, 1: 2 * n // 10, 2: 3 * n // 10, 3: 4 * n // 10}),
         }
         for recipe in schedule["recipes"]:
             if totals[recipe] != expected[recipe]:

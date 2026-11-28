@@ -101,3 +101,30 @@ tar -cf "../blur-study-${run_id}.tar" \
 ```
 
 After extracting the archive, run `tensorboard --logdir training/logs` from the extraction directory. Compare the training objective and component losses across steps and recipes. The trainer records pre-clipping gradient norms by parameter group, skipping the first batch of each epoch for those norms. The held-out evaluation scores are in `outputs/blur_study/summary/`.
+
+## 6. Randomized-severity recipes `width2to10_a` and `width2to10_b`
+
+These two recipes keep every sample of the shared schedule and replace the fixed 31 px blur with a per-view width. Each blurred view gets its own width, drawn uniformly from 2–10% of that view's source image width (about 17–85 px at 846 px). It is applied with the same horizontal box blur, at source resolution, before any crop or resize.
+
+| Recipe | Recordings with 0 / 1 / 2 / 3 blurred views per pass | Isolates |
+|---|---:|---|
+| `width2to10_a` | 0 / 150 / 150 / 150 (the views `variable` blurs) | A minus `variable`: the change of severity distribution |
+| `width2to10_b` | 45 / 90 / 135 / 180 (same 900 widths per pass as A) | B minus A: the change of blur-count distribution |
+
+Build the schedule from `schedule.json`. The output is deterministic and committed. `--check` verifies the committed file against a fresh build and against the schedule used for the 2026-11-27 run (`112280f4e37a…`).
+
+```bash
+python experiments/blur_study/build_width2to10_schedule.py           # -> schedule_width2to10.json (+ _audit.json)
+python experiments/blur_study/build_width2to10_schedule.py --check
+```
+
+Train with that schedule (the pilot `schedule.json` has no width recipes):
+
+```bash
+cd training && torchrun --standalone --nproc_per_node=1 launch.py --config blur_study recipe=width2to10_a \
+  data.train.dataset.schedule_path=../experiments/blur_study/schedule_width2to10.json
+```
+
+The schedule stores `width_fraction_by_view[recipe]` per sample, with 10 entries and 0 for sharp views. `ScheduledBlurDataset` passes it as `blur_cfg={"width_fractions": ...}`. `UnifiedDataset.get_data` checks it and blurs view *i* with a kernel of `fraction[i] × source width` px, rounded to the nearest odd number.
+
+For evaluation, `eval/motion_blur.py` takes `--blur-px` for a fixed width at the 846 px reference (for example 16.92 / 33.84 / 50.76 / 67.68 / 84.6 for 2 / 4 / 6 / 8 / 10%). It also takes `--mixed-severity` for the `mixed_uniform` condition, which gives each blurred frame its own uniform 2–10% width seeded by frame name. The per-frame widths are recorded in each scene's report.

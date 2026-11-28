@@ -118,11 +118,19 @@ def run_scene(args, scene, indices, dataset, predictor):
     variants_dir.mkdir(parents=True, exist_ok=True)
     clean_inputs, crop = predictor.prepare_images(batch.image_paths)
     variant_paths = batch.image_paths.copy()
+    fractions = {}
+    for i in sorted(selected_positions):
+        if args.mixed_severity:
+            key = f"mixed-uniform-v1/{args.seed}/{args.dataset}/{scene}/{batch.frame_names[i]}"
+            fractions[i] = random.Random(key).uniform(0.02, 0.10)
+        else:
+            fractions[i] = args.blur_px / args.reference_width
+    nominal = {i: f * args.reference_width if args.mixed_severity else args.blur_px for i, f in fractions.items()}
     kernels = {}
     for i in sorted(selected_positions):
         filename = batch.frame_names[i]
         path = variants_dir / Path(filename).with_suffix(".png")
-        kernels[filename] = write_blurred(batch.image_paths[i], path, args.blur_px,
+        kernels[filename] = write_blurred(batch.image_paths[i], path, nominal[i],
                                           args.reference_width)
         variant_paths[i] = str(path)
     blur_inputs, blur_crop = predictor.prepare_images(variant_paths)
@@ -166,8 +174,10 @@ def run_scene(args, scene, indices, dataset, predictor):
                         "numpy": np.__version__, "device": args.device},
         "blur": {"kernel_xy": [next(iter(kernels.values())), 1] if len(set(kernels.values())) == 1 else None,
                  "source_kernel_widths": kernels, "reference_image_width": args.reference_width,
-                 "target_width_fraction": args.blur_px / args.reference_width,
-                 "reference_kernel_width": args.blur_px,
+                 "target_width_fraction": None if args.mixed_severity else args.blur_px / args.reference_width,
+                 "width_fraction_by_frame": {batch.frame_names[i]: f for i, f in fractions.items()},
+                 "reference_width_by_frame": {batch.frame_names[i]: w for i,w in nominal.items()},
+                 "reference_kernel_width": None if args.mixed_severity else args.blur_px,
                  "border": "BORDER_REFLECT_101",
                  "stage": "prepared RGB, before predictor preprocessing"},
         "frames": [
@@ -211,6 +221,10 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--overwrite", action="store_true",
                         help="delete an existing, non-empty output directory first")
+    parser.add_argument("--mixed-severity", action="store_true",
+                        help="give each blurred frame its own width, uniform in 2-10%% of the image "
+                             "width and seeded by frame name (the mixed_uniform condition); "
+                             "--blur-px is then ignored")
     parser.add_argument("--blur-px", type=float, default=DEFAULT_BLUR_PX,
                         help="kernel width at the reference width (study severity: 31)")
     parser.add_argument("--reference-width", type=float, default=DEFAULT_REFERENCE_WIDTH)
@@ -258,7 +272,8 @@ def main() -> None:
     report["meta"] = {
         "dataset": args.dataset, "model_name": args.model_name,
         "checkpoint": str(args.checkpoint), "seed": args.seed,
-        "blur_px": args.blur_px, "reference_width": args.reference_width,
+        "blur_px": None if args.mixed_severity else args.blur_px, "reference_width": args.reference_width,
+        "mixed_distribution": "uniform_0.02_0.10_per_frame_v1" if args.mixed_severity else None,
         "scenes": list(per_scene), "frames": str(args.frames),
         "aggregation": "placements averaged within each scene, then scenes weighted equally",
     }

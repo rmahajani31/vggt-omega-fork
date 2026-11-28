@@ -3,8 +3,9 @@
 One immutable schedule is shared by every recipe. For each pass over the training recordings
 it fixes the batch composition, each batch's aspect ratio, every sample's frame indices, the
 seed that drives crop/scale/colour augmentation, and a permutation of the blur-eligible view
-positions. A recipe only chooses how many views of that permutation to blur, so all recipes
-see identical recordings, frames, view order and augmentation; only the blurred pixels differ.
+positions. A recipe only chooses how many views of that permutation to blur (and, for the
+random-width recipes, each blurred view's width), so all recipes see identical recordings,
+frames, view order and augmentation; only the blurred pixels differ.
 """
 
 from __future__ import annotations
@@ -24,17 +25,25 @@ SCHEDULE_VERSION = 1
 # Manifest dataset label -> training config key.
 MANIFEST_DATASETS = {"uCO3D": "uco3d", "Hypersim": "hypersim", "MVS-Synth": "mvssynth"}
 
-RECIPES = ("clean", "fixed", "variable", "clean_or_heavy")
+# Recipes that blur with the schedule's single width (``schedule["blur"]``: 31 px at 846 px).
+#   clean           no view blurred
+#   fixed           2 views blurred in every sample
+#   variable        1, 2 or 3 views blurred, a third of the samples each
+#   clean_or_heavy  0 or 4 views blurred, half of the samples each
+FIXED_WIDTH_RECIPES = ("clean", "fixed", "variable", "clean_or_heavy")
 
-# Randomized-severity recipes, added by experiments/blur_study/build_width2to10_schedule.py on top
-# of the shared schedule. Each sample also carries ``width_fraction_by_view[recipe]``: one kernel
-# width per view as a fraction of that source image's width, drawn uniformly from
-# WIDTH_FRACTION_RANGE for blurred views and 0 for sharp ones.
-#   width2to10_a: the views `variable` blurs (150 each of 1/2/3 per pass), with random widths.
-#   width2to10_b: the same 900 widths per pass, redistributed to 45/90/135/180 recordings
-#                 with 0/1/2/3 blurred views.
-WIDTH_RECIPES = ("width2to10_a", "width2to10_b")
+# Recipes that give every blurred view its own width, a fraction of that view's source image
+# width drawn uniformly from WIDTH_FRACTION_RANGE, stored per sample in
+# ``width_fraction_by_view[recipe]`` (one entry per view, 0 for sharp views).
+#   variable_random_width  blurs exactly the views `variable` blurs; versus `variable` it
+#                          changes only the width distribution.
+#   ramped_random_width    the same widths per pass on 10/20/30/40% of samples with 0/1/2/3
+#                          blurred views; versus variable_random_width it changes only how
+#                          the blurred views are spread over samples.
+RANDOM_WIDTH_RECIPES = ("variable_random_width", "ramped_random_width")
 WIDTH_FRACTION_RANGE = (0.02, 0.10)
+
+RECIPES = FIXED_WIDTH_RECIPES + RANDOM_WIDTH_RECIPES
 
 
 def stable_seed(*parts) -> int:
@@ -86,6 +95,52 @@ def recipe_counts(recipe: str, n: int, rng: random.Random) -> List[int]:
     raise ValueError(f"Unknown recipe {recipe}")
 
 
+def assign_random_widths(samples: List[Dict], seed: int, pass_idx: int, num_views: int) -> None:
+    """Add the RANDOM_WIDTH_RECIPES to one pass's samples (which already carry `variable`).
+
+    variable_random_width copies `variable`'s blur counts. ramped_random_width changes the
+    fewest samples needed to reach 10/20/30/40% with 0/1/2/3 blurred views while keeping its
+    blurred views a prefix of each blur_perm: n/10 one-view samples become sharp, n/30 one-view
+    samples gain a view and n/15 two-view samples gain a view. One width is drawn per
+    variable_random_width blurred view; ramped_random_width keeps it on every view both recipes
+    blur and moves the widths of the views it no longer blurs, shuffled, to the views it newly
+    blurs. Both recipes therefore use the same multiset of widths in every pass.
+
+    Uses its own seeded generators, so the fixed-width recipes, frames and aspect ratios are
+    unchanged by adding these recipes.
+    """
+    n = len(samples)
+    if n % 30:
+        raise ValueError(f"The random-width recipes need a multiple of 30 samples per pass, got {n}")
+    variable_width, ramped = RANDOM_WIDTH_RECIPES
+    rng = random.Random(stable_seed(seed, "severity-v1", pass_idx))
+    groups = {k: [i for i, s in enumerate(samples) if s["blur_count"]["variable"] == k]
+              for k in (1, 2, 3)}
+    for indices in groups.values():
+        rng.shuffle(indices)
+    for s in samples:
+        s["blur_count"][variable_width] = s["blur_count"][ramped] = s["blur_count"]["variable"]
+    k = n // 30
+    for ids, count in ((groups[1][:3 * k], 0), (groups[1][3 * k:4 * k], 2), (groups[2][:2 * k], 3)):
+        for i in ids:
+            samples[i]["blur_count"][ramped] = count
+    slots = {r: [(i, p) for i, s in enumerate(samples) for p in blurred_positions(s, r)]
+             for r in RANDOM_WIDTH_RECIPES}
+    width_rng = random.Random(stable_seed(seed, "uniform-width-2-to-10", pass_idx))
+    widths = {variable_width: {slot: width_rng.uniform(*WIDTH_FRACTION_RANGE)
+                               for slot in slots[variable_width]}}
+    lost = sorted(set(slots[variable_width]) - set(slots[ramped]))
+    gained = sorted(set(slots[ramped]) - set(slots[variable_width]))
+    recycled = [widths[variable_width][slot] for slot in lost]
+    rng.shuffle(recycled)
+    widths[ramped] = {slot: widths[variable_width][slot] for slot in slots[ramped]
+                      if slot in widths[variable_width]}
+    widths[ramped].update(zip(gained, recycled))
+    for i, s in enumerate(samples):
+        s["width_fraction_by_view"] = {r: [widths[r].get((i, p), 0) for p in range(num_views)]
+                                       for r in RANDOM_WIDTH_RECIPES}
+
+
 def build_schedule(
     recordings: Sequence[Mapping[str, str]],
     sample_frame_ids: Callable[[str, str, int], Sequence[int]],
@@ -115,6 +170,8 @@ def build_schedule(
         "batch_size": batch_size,
         "num_views": num_views,
         "blur": {"blur_px": blur_px, "reference_width": reference_width},
+        "random_width": {"fraction_range": list(WIDTH_FRACTION_RANGE),
+                         "recipes": list(RANDOM_WIDTH_RECIPES)},
         "recipes": list(RECIPES),
         "metadata": dict(metadata or {}),
         "schedule": [],
@@ -123,7 +180,7 @@ def build_schedule(
         rng = random.Random(stable_seed(seed, "pass", pass_idx))
         order = list(recordings)
         rng.shuffle(order)
-        counts = {recipe: recipe_counts(recipe, len(order), rng) for recipe in RECIPES}
+        counts = {recipe: recipe_counts(recipe, len(order), rng) for recipe in FIXED_WIDTH_RECIPES}
         samples = []
         for i, rec in enumerate(order):
             sample_seed = stable_seed(seed, "frames", pass_idx, rec["dataset"], rec["seq_name"])
@@ -139,8 +196,9 @@ def build_schedule(
                 "frame_ids": frame_ids,
                 "aug_seed": stable_seed(seed, "aug", pass_idx, rec["dataset"], rec["seq_name"]),
                 "blur_perm": perm_rng.sample(eligible, len(eligible)),
-                "blur_count": {recipe: counts[recipe][i] for recipe in RECIPES},
+                "blur_count": {recipe: counts[recipe][i] for recipe in FIXED_WIDTH_RECIPES},
             })
+        assign_random_widths(samples, seed, pass_idx, num_views)
         batches = []
         for b in range(0, len(samples), batch_size):
             batches.append({
@@ -182,13 +240,41 @@ def validate_schedule(schedule: Mapping, expected_recordings: set | None = None)
             "fixed": Counter({2: n}),
             "variable": Counter({1: n // 3, 2: n // 3, 3: n // 3}),
             "clean_or_heavy": Counter({0: n // 2, 4: n // 2}),
-            "width2to10_a": Counter({1: n // 3, 2: n // 3, 3: n // 3}),
-            "width2to10_b": Counter({0: n // 10, 1: 2 * n // 10, 2: 3 * n // 10, 3: 4 * n // 10}),
+            "variable_random_width": Counter({1: n // 3, 2: n // 3, 3: n // 3}),
+            "ramped_random_width": Counter({0: n // 10, 1: n // 5, 2: 3 * n // 10, 3: 2 * n // 5}),
         }
         for recipe in schedule["recipes"]:
+            if recipe not in expected:
+                raise ValueError(f"Unknown recipe {recipe!r} in schedule")
             if totals[recipe] != expected[recipe]:
                 raise ValueError(f"Pass {entry['pass']} {recipe} counts {dict(totals[recipe])} "
                                  f"!= {dict(expected[recipe])}")
+        random_width = [r for r in RANDOM_WIDTH_RECIPES if r in schedule["recipes"]]
+        if random_width:
+            _validate_random_widths(entry["pass"], samples, random_width, num_views)
+
+
+def _validate_random_widths(pass_idx: int, samples: Sequence[Mapping], recipes: Sequence[str],
+                            num_views: int) -> None:
+    low, high = WIDTH_FRACTION_RANGE
+    per_recipe = {}
+    for r in recipes:
+        slots = {}
+        for i, s in enumerate(samples):
+            v = s["width_fraction_by_view"][r]
+            if len(v) != num_views or [p for p, w in enumerate(v) if w] != blurred_positions(s, r):
+                raise ValueError(f"Pass {pass_idx} {r}: widths of {s['seq_name']} do not match its blurred views")
+            if any(w and not low <= w <= high for w in v):
+                raise ValueError(f"Pass {pass_idx} {r}: width outside {WIDTH_FRACTION_RANGE} for {s['seq_name']}")
+            slots.update({(i, p): w for p, w in enumerate(v) if w})
+        per_recipe[r] = slots
+    if set(recipes) == set(RANDOM_WIDTH_RECIPES):
+        variable_width, ramped = RANDOM_WIDTH_RECIPES
+        a, b = per_recipe[variable_width], per_recipe[ramped]
+        if any(blurred_positions(s, variable_width) != blurred_positions(s, "variable") for s in samples):
+            raise ValueError(f"Pass {pass_idx}: {variable_width} must blur exactly the views `variable` blurs")
+        if sorted(a.values()) != sorted(b.values()) or any(b[k] != a[k] for k in a.keys() & b.keys()):
+            raise ValueError(f"Pass {pass_idx}: {ramped} must reuse {variable_width}'s widths")
 
 
 def load_schedule(path: str | Path) -> Dict:

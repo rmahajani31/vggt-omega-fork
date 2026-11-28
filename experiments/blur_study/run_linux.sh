@@ -22,7 +22,7 @@ fi
 
 RECIPES=("$@")
 if [[ ${#RECIPES[@]} -eq 0 ]]; then
-  RECIPES=(clean fixed variable clean_or_heavy)
+  RECIPES=(clean fixed variable clean_or_heavy variable_random_width ramped_random_width)
 fi
 NUM_GPUS="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)"
 PARALLEL=$(( NUM_GPUS >= 2 ? 2 : 1 ))

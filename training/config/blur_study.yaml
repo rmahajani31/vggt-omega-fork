@@ -14,8 +14,8 @@ defaults:
   - default_dataset.yaml
   - _self_
 
-recipe: clean  # BLUR STUDY: clean | fixed | variable | clean_or_heavy | width2to10_a | width2to10_b
-# (width2to10_* need data.train.dataset.schedule_path=.../schedule_width2to10.json, see README section 6)
+recipe: clean  # BLUR STUDY: clean | fixed | variable | clean_or_heavy | variable_random_width |
+               # ramped_random_width (see data/blur_schedule.py and experiments/blur_study/README.md)
 exp_name: blur_study_${recipe}
 
 data:

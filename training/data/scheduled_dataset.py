@@ -18,7 +18,8 @@ import torch
 from hydra.utils import instantiate
 from torch.utils.data import DataLoader
 
-from .blur_schedule import RECIPES, WIDTH_RECIPES, blurred_positions, load_schedule, schedule_sha256
+from .blur_schedule import (RANDOM_WIDTH_RECIPES, RECIPES, blurred_positions, load_schedule,
+                            schedule_sha256)
 from .composed_dataset import ComposedDataset
 from .worker_fn import get_worker_init_fn
 
@@ -26,14 +27,14 @@ from .worker_fn import get_worker_init_fn
 class ScheduledBlurDataset(ComposedDataset):
     def __init__(self, dataset_configs, common_config, schedule_path, recipe):
         super().__init__(dataset_configs, common_config)
-        if recipe not in RECIPES + WIDTH_RECIPES:
-            raise ValueError(f"recipe must be one of {RECIPES + WIDTH_RECIPES}, got {recipe!r}")
+        if recipe not in RECIPES:
+            raise ValueError(f"recipe must be one of {RECIPES}, got {recipe!r}")
         self.recipe = recipe
         self.schedule_path = str(schedule_path)
         self.schedule = load_schedule(schedule_path)
         if recipe not in self.schedule["recipes"]:
-            raise ValueError(f"{self.schedule_path} has no {recipe!r} recipe; the width2to10 recipes "
-                             "need experiments/blur_study/schedule_width2to10.json")
+            raise ValueError(f"{self.schedule_path} has no {recipe!r} recipe; rebuild it with "
+                             "experiments/blur_study/build_schedule.py")
         self.blur_cfg = dict(self.schedule["blur"])
         self.num_views = self.schedule["num_views"]
         missing = {s["dataset"] for p in self.schedule["schedule"] for b in p["batches"]
@@ -67,9 +68,9 @@ class ScheduledBlurDataset(ComposedDataset):
             aspect_ratio=batch_entry["aspect_ratio"],
             exact_ids=True,
             blur_views=blurred_positions(sample, self.recipe),
-            # Width recipes blur each selected view with its own scheduled source-width fraction.
+            # Random-width recipes blur each selected view with its own scheduled width fraction.
             blur_cfg=({"width_fractions": sample["width_fraction_by_view"][self.recipe]}
-                      if self.recipe in WIDTH_RECIPES else self.blur_cfg),
+                      if self.recipe in RANDOM_WIDTH_RECIPES else self.blur_cfg),
         )
         out = self.postprocess(raw)
         out["blur_mask"] = torch.zeros(self.num_views, dtype=torch.bool)

@@ -1,6 +1,9 @@
 # VGGT-Ω motion-blur fine-tuning study: how to run it
 
-This study fine-tunes VGGT-Ω with LoRA under four blur recipes (clean, fixed-2, variable 1/2/3, clean-or-4). All four see an identical sequence of samples and differ only in which views are blurred: 31 px horizontal box blur at an 846 px reference width, applied to the source image, with view 0 always clean.
+This study fine-tunes VGGT-Ω with LoRA under six blur recipes. All six see an identical sequence of samples and differ only in which views are blurred and how strongly. The blur is a horizontal box blur applied to the source image, with view 0 always clean.
+
+- Four recipes use a single width of 31 px at an 846 px reference width: clean, fixed-2, variable 1/2/3 and clean-or-4.
+- Two recipes, `variable_random_width` and `ramped_random_width`, give each blurred view its own width of 2–10% of the image width (section 6).
 
 Each recipe is evaluated alongside the original checkpoint on three cohorts: 50 held-out source recordings, Sintel and ETH3D. Inference uses `max_size` 512.
 
@@ -49,6 +52,9 @@ The schedule fixes all of the following for every recipe:
     - fixed: 2
     - variable: exactly 150 each of 1/2/3 per pass
     - clean-or-4: exactly 225 each of 0/4 per pass
+    - variable_random_width: the same counts as variable
+    - ramped_random_width: exactly 45/90/135/180 with 0/1/2/3 per pass
+  - for the two random-width recipes, a width per blurred view (`width_fraction_by_view`)
 
   A recipe blurs the first *count* views of that permutation.
 
@@ -102,29 +108,22 @@ tar -cf "../blur-study-${run_id}.tar" \
 
 After extracting the archive, run `tensorboard --logdir training/logs` from the extraction directory. Compare the training objective and component losses across steps and recipes. The trainer records pre-clipping gradient norms by parameter group, skipping the first batch of each epoch for those norms. The held-out evaluation scores are in `outputs/blur_study/summary/`.
 
-## 6. Randomized-severity recipes `width2to10_a` and `width2to10_b`
+## 6. Random-width recipes `variable_random_width` and `ramped_random_width`
 
-These two recipes keep every sample of the shared schedule and replace the fixed 31 px blur with a per-view width. Each blurred view gets its own width, drawn uniformly from 2–10% of that view's source image width (about 17–85 px at 846 px). It is applied with the same horizontal box blur, at source resolution, before any crop or resize.
+These two recipes replace the single 31 px width with a width per blurred view. Each width is drawn uniformly from 2–10% of that view's source image width, about 17–85 px at 846 px. `build_schedule.py` adds them to `schedule.json` next to the four single-width recipes. They use their own seeded generators, so adding them leaves every frame, augmentation seed, view order, aspect ratio and single-width blur count unchanged.
 
-| Recipe | Recordings with 0 / 1 / 2 / 3 blurred views per pass | Isolates |
-|---|---:|---|
-| `width2to10_a` | 0 / 150 / 150 / 150 (the views `variable` blurs) | A minus `variable`: the change of severity distribution |
-| `width2to10_b` | 45 / 90 / 135 / 180 (same 900 widths per pass as A) | B minus A: the change of blur-count distribution |
+| Recipe | Samples with 0 / 1 / 2 / 3 blurred views per pass | Compared with | Isolates |
+|---|---:|---|---|
+| `variable_random_width` | 0 / 150 / 150 / 150 (exactly the views `variable` blurs) | `variable` | the width distribution |
+| `ramped_random_width` | 45 / 90 / 135 / 180 (the same 900 widths per pass) | `variable_random_width` | how blurred views are spread over samples |
 
-Build the schedule from `schedule.json`. The output is deterministic and committed. `--check` verifies the committed file against a fresh build and against the schedule used for the 2026-11-27 run (`112280f4e37a…`).
+`ramped_random_width` keeps `variable_random_width`'s width on every view both recipes blur. It reassigns the 45 widths it frees to the 45 views it newly blurs. `validate_schedule` checks these invariants on load, and the random-width recipes need a multiple of 30 recordings per pass, which matters for `--limit` smoke schedules.
 
-```bash
-python experiments/blur_study/build_width2to10_schedule.py           # -> schedule_width2to10.json (+ _audit.json)
-python experiments/blur_study/build_width2to10_schedule.py --check
-```
+Train them like any other recipe, for example `torchrun --standalone --nproc_per_node=1 launch.py --config blur_study recipe=variable_random_width`. They are part of `run_linux.sh`'s default list. `ScheduledBlurDataset` passes each sample's `width_fraction_by_view[recipe]` as `blur_cfg={"width_fractions": ...}`, and `UnifiedDataset.get_data` blurs view *i* with a kernel of `fraction[i] × source width` px, rounded to the nearest odd number.
 
-Train with that schedule (the pilot `schedule.json` has no width recipes):
+For evaluation, `eval/motion_blur.py` takes two options:
 
-```bash
-cd training && torchrun --standalone --nproc_per_node=1 launch.py --config blur_study recipe=width2to10_a \
-  data.train.dataset.schedule_path=../experiments/blur_study/schedule_width2to10.json
-```
+- `--blur-px` sets a single width at the 846 px reference, for example 16.92 / 33.84 / 50.76 / 67.68 / 84.6 for 2 / 4 / 6 / 8 / 10%.
+- `--mixed-severity` sets the `mixed_uniform` condition. Each blurred frame gets its own uniform 2–10% width, seeded by frame name.
 
-The schedule stores `width_fraction_by_view[recipe]` per sample, with 10 entries and 0 for sharp views. `ScheduledBlurDataset` passes it as `blur_cfg={"width_fractions": ...}`. `UnifiedDataset.get_data` checks it and blurs view *i* with a kernel of `fraction[i] × source width` px, rounded to the nearest odd number.
-
-For evaluation, `eval/motion_blur.py` takes `--blur-px` for a fixed width at the 846 px reference (for example 16.92 / 33.84 / 50.76 / 67.68 / 84.6 for 2 / 4 / 6 / 8 / 10%). It also takes `--mixed-severity` for the `mixed_uniform` condition, which gives each blurred frame its own uniform 2–10% width seeded by frame name. The per-frame widths are recorded in each scene's report.
+**Earlier names.** The 2026-11-27 run, in `outputs/randomized-blur-width2to10/20261127T185344Z`, called these recipes `width2to10_a` (now `variable_random_width`) and `width2to10_b` (now `ramped_random_width`). The current `schedule.json` reproduces that run's blur counts and widths exactly.

@@ -17,7 +17,7 @@ from _paths import REPOSITORY, TRAINING
 from train_utils.lora import merge_lora_state_dict
 from vggt_omega.models import VGGTOmega
 
-RECIPES = ("clean", "fixed", "variable", "clean_or_heavy")
+from data.blur_schedule import RECIPES  # noqa: E402  (training/ is importable via _paths)
 
 
 def export(checkpoint: Path, output: Path, r: int, alpha: float) -> None:
